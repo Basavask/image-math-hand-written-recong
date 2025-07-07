@@ -11,6 +11,8 @@ import tempfile
 import uuid
 import logging
 
+pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
