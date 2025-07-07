@@ -10,6 +10,8 @@ from math_solver_backend import MathSolver  # Fixed import
 import tempfile
 import uuid
 import logging
+import pytesseract
+import os
 
 pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
