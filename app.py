@@ -1,127 +1,215 @@
 from flask import Flask, request, jsonify, render_template
-import cv2
-import numpy as np
-import pytesseract
-from sympy import sympify, solve, Symbol
-from PIL import Image
+from flask_cors import CORS
 import os
+import base64
+from io import BytesIO
+from PIL import Image
+import numpy as np
+import cv2
+from math_solver_backend import MathSolver  # Fixed import
+import tempfile
+import uuid
+import logging
 
-# Set Tesseract path (Windows only - adjust if needed)
-pytesseract.pytesseract.tesseract_cmd = r'C:\Users\BasavarajSK\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+CORS(app)
 
-# Image preprocessing function
-def preprocess_image(image_file):
-    img = Image.open(image_file).convert("RGB")
-    img = np.array(img)
+# Initialize the math solver
+solver = MathSolver()
 
-    # Convert to grayscale
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+# Configuration
+UPLOAD_FOLDER = 'uploads'
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
 
-    # Reduce noise but preserve edges
-    filtered = cv2.bilateralFilter(gray, 9, 75, 75)
-
-    # Adaptive thresholding (inverted)
-    binary = cv2.adaptiveThreshold(
-        filtered, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV, 11, 2
-    )
-
-    # Save for debugging
-    cv2.imwrite("debug_processed.png", binary)
-
-    return binary
-
-# OCR function to extract text
-def ocr_image(image):
-    custom_config = r'--oem 1 --psm 7 -c tessedit_char_whitelist=0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ=+-*/^().xX'
-    text = pytesseract.image_to_string(image, config=custom_config)
-    return text.strip()
-
-# def ocr_image(image):
-#     # Tesseract config
-#     custom_config = r'--oem 1 --psm 7'
-#     text = pytesseract.image_to_string(image, config=custom_config)
-#     return text.strip()
-
-def clean_expression(text):
-    # Remove anything not math related
-    allowed_chars = "0123456789+-*/^=.xX() "
-    return ''.join(c for c in text if c in allowed_chars)
-
-# Solve math expression
-def solve_expression(expression):
-    try:
-        if not expression or not expression.strip():
-            return "Error: No valid expression extracted"
-
-        # Clean expression
-        expression = expression.replace('=', '-').replace('^', '**')
-
-        if '=' in expression:
-            left, right = expression.split('=')
-            expression = f"{left} - ({right})"
-
-        # Use SymPy to solve
-        expr = sympify(expression)
-
-        if 'x' in expression.lower():
-            x = Symbol('x')
-            solutions = solve(expr, x)
-            return f"Solution: x = {solutions}"
-        else:
-            result = expr.evalf()
-            return f"Result: {result}"
-
-    except Exception as e:
-        return f"Error: {str(e)}"
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 
 @app.route('/')
 def index():
+    """Serve the main HTML page"""
     return render_template('index.html')
 
-@app.route('/upload', methods=['POST'])
-def upload_image():
-    print(".....................................")
-    if 'image' not in request.files:
-        return jsonify({'error': 'No image uploaded'}), 400
-
-    file = request.files['image']
-    print(".......fuuuuuuu..............................",file)
+@app.route('/api/solve', methods=['POST'])
+def solve_math():
+    """
+    API endpoint to solve handwritten math from uploaded image
     
-    print(".......fuuuuuuu..............................",file.filename)
-
-    if file.filename == '':
-        return jsonify({'error': 'No file selected'}), 400
-
+    Expected JSON format:
+    {
+        "image": "base64_encoded_image_string",
+        "format": "jpg|png|jpeg"
+    }
+    """
     try:
-        print(".......fueeeeeeeuuuuuu..............................",file)
+        data = request.get_json()
         
-        # Preprocess image
-        processed_img = preprocess_image(file)
-        print("preeeeee", processed_img)
-
-        # Extract text
-        extracted_text = ocr_image(processed_img)
-        print("extracted_text", extracted_text)
-        extracted_text = clean_expression(extracted_text)
+        if not data or 'image' not in data:
+            return jsonify({
+                'error': 'No image data provided',
+                'success': False
+            }), 400
         
-        print(f"OCR Extracted Text: >>>{extracted_text}<<<")
-
-        # Solve math
-        print(f"Extracted Text (raw): >>>{extracted_text}<<<")
-
-        solution = solve_expression(extracted_text)
-
-        return jsonify({
-            'expression': extracted_text or "No expression detected",
-            'solution': solution
-        })
-
+        # Decode base64 image
+        image_data = data['image']
+        if image_data.startswith('data:image'):
+            # Remove data URL prefix
+            image_data = image_data.split(',')[1]
+        
+        # Decode and save image
+        img_bytes = base64.b64decode(image_data)
+        img = Image.open(BytesIO(img_bytes))
+        
+        # Convert to RGB if necessary
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        # Generate unique filename
+        filename = f"{uuid.uuid4()}.png"
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        
+        # Save image
+        img.save(filepath)
+        
+        logger.info(f"Processing image: {filename}")
+        
+        # Process image and solve
+        result = solver.process_image_and_solve(filepath)
+        
+        # Clean up temporary file
+        try:
+            os.remove(filepath)
+        except:
+            logger.warning(f"Could not remove temporary file: {filepath}")
+        
+        # Format solution for display
+        solution_display = result.get('solution', None)
+        if solution_display is not None:
+            if isinstance(solution_display, (list, tuple)):
+                solution_display = str(solution_display)
+            elif hasattr(solution_display, '__str__'):
+                solution_display = str(solution_display)
+        
+        # Format response
+        response = {
+            'success': True,
+            'result': result,
+            'original_expression': result.get('cleaned_expression', ''),
+            'solution': solution_display,
+            'steps': result.get('steps', []),
+            'expression_type': result.get('expression_type', 'unknown'),
+            'raw_ocr_text': result.get('raw_ocr_text', ''),
+            'error': result.get('error', None)
+        }
+        
+        return jsonify(response)
+        
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Error processing image: {str(e)}")
+        return jsonify({
+            'error': str(e),
+            'success': False
+        }), 500
+
+@app.route('/api/solve-text', methods=['POST'])
+def solve_text():
+    """
+    API endpoint to solve math expression from text input
+    
+    Expected JSON format:
+    {
+        "expression": "mathematical_expression"
+    }
+    """
+    try:
+        data = request.get_json()
+        
+        if not data or 'expression' not in data:
+            return jsonify({
+                'error': 'No expression provided',
+                'success': False
+            }), 400
+        
+        expression = data['expression']
+        logger.info(f"Solving text expression: {expression}")
+        
+        result = solver.solve_expression(expression)
+        
+        # Format solution for display
+        solution_display = result.get('solution', None)
+        if solution_display is not None:
+            if isinstance(solution_display, (list, tuple)):
+                solution_display = str(solution_display)
+            elif hasattr(solution_display, '__str__'):
+                solution_display = str(solution_display)
+        
+        response = {
+            'success': True,
+            'result': result,
+            'original_expression': expression,
+            'solution': solution_display,
+            'steps': result.get('steps', []),
+            'expression_type': result.get('expression_type', 'unknown'),
+            'error': result.get('error', None)
+        }
+        
+        return jsonify(response)
+        
+    except Exception as e:
+        logger.error(f"Error solving text expression: {str(e)}")
+        return jsonify({
+            'error': str(e),
+            'success': False
+        }), 500
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'healthy',
+        'message': 'Math Solver API is running',
+        'version': '1.0.0'
+    })
+
+@app.errorhandler(413)
+def too_large(e):
+    return jsonify({
+        'error': 'File too large. Maximum size is 16MB.',
+        'success': False
+    }), 413
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({
+        'error': 'Endpoint not found',
+        'success': False
+    }), 404
+
+@app.errorhandler(500)
+def internal_server_error(e):
+    return jsonify({
+        'error': 'Internal server error',
+        'success': False
+    }), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Create required directories
+    directories = ['templates', 'static', 'uploads']
+    for directory in directories:
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+            logger.info(f"Created directory: {directory}")
+    
+    print("🚀 Starting Math Solver API...")
+    print("📋 Available endpoints:")
+    print("  GET  /              - Main web interface")
+    print("  POST /api/solve     - Solve from image")
+    print("  POST /api/solve-text - Solve from text")
+    print("  GET  /api/health    - Health check")
+    print("🌐 Access the app at: http://localhost:5000")
+    
+    app.run(debug=True, host='0.0.0.0', port=5000)
