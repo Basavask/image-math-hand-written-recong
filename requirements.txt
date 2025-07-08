@@ -6,4 +6,4 @@ flask
 flask-cors
 numpy
 requests
-
+google-generativeai
